@@ -1,0 +1,325 @@
+<?php
+
+	# PHP Script to FTP titles over to distributors
+	# Created by: Meia Pheonix
+	# Created on: 2012-08-07
+	# Last edited by: Meia Pheonix [MP]
+	# Last edited on: 2012-10-12
+	# Editor Tags: Meia Pheonix [MP]
+	# Notes:	
+	#		[2012-08-07] This script is executed by /foo/MyFunctions.asp on the testing server. [MP]
+	#		[2012-08-07] MyFunctions.asp is triggered by /foo/MyScripts.js which is called by several pages in the /bar/ folder. [MP]
+	#
+	# Update Log:
+	#		[2012-09-10] Port exceptions, distributor_3 2013, all else default. [MP]
+	#		[2012-09-14] Trigger email after FTP response comes back, via child processes and update to BASH script. [MP]
+	#		[2012-09-17] Pull in MetaData file name for FTP transfer. [MP]
+	#		[2012-09-18] Distributor email won't be triggered if FTP returns a fail message. [MP]
+	#		[2012-10-03] Updated code to pull the email message from the text file, if the response is empty. [MP]
+	#		[2012-10-12] Updated code to pull ids from the database for emails. [MP]
+
+  $user			= $_GET["user"];           						# set variable for user
+	$dir			= $_GET["directory"];           						# set variable for remote directory
+	$distributor		= $_GET["distributor"];         						# set variable for distributor
+	$ftype			= $_GET["filetype"];           							# set variable flag for sending file types
+	$images			= $_GET["imgs"];                						# set variable flag for sending images
+	$emailstatus		= 'unsent';                     						# set variable flag for sending timeout emails.
+	$ftpresponse 		= '';                          							# set variable default for ftpResponse
+	$emailtxt		= '';                           						# set variable default for ftpTXT
+	$customlist		= file('/foo/CustomDistributors.txt');						# set array to contain a list of distributors that require custom script
+	$myCompany    = "BitBull";                              # My Company Name
+
+	if($ftype=='type1')											# if ebooks is yes, set ebooks to 1 (true)
+	{
+		$ftype=1;
+		$distributor.="_type1";
+	}
+	else													# else set ebooks to 0 (false)
+	{
+		$ftype=0;
+	}
+
+	if(!function_exists('pcntl_fork'))									# if fork function does not exist, kill script and throw error message
+	{
+		die('PCNTL functions not available on this PHP installation');
+	}
+	else													# else start script
+	{
+		$pid 	= pcntl_fork();										# fork function
+		switch ($pid)											# switch based on process id (pID)
+		{
+			case -1:										# if pID is -1, kill script and throw error message
+				// @fail
+				die('Fork attempt failed, contact support for assistance.');
+			break;
+
+			case 0:											# if pID is 0, trigger FTP script
+				// @child
+				$fileCount	= getFileCount($distributor, $DoAll);
+				$timeout	= ((microtime(true)) + ($fileCount * 5400000));
+
+				print "Process is running...\n\n";						# print process is running					
+														# trigger FTP function and assign return value to variable (below)
+				if(inarray($distributor,$customlist))
+				{
+					$ftpresponse	= start_Custom_FTP($distributor, $dir, $ftype);
+				}
+				else if($ftype==1)
+				{
+					$ftpresponse	= start_FTP_2($distributor, $dir);
+				}
+				else
+				{
+					$ftpresponse	= start_FTP_1($distributor, $dir);
+				}
+				
+				if (microtime(true) >= $timeout && $emailStatus == 'unsent')
+				{
+					sendErrEmail($distributor);
+					$emailstatus = 'sent';
+					exit(0);
+				}
+
+				if($ftpresponse == "undefined" || $ftpresponse == "")
+				{
+					$emailtxt=fopen("/tmp/Email_$distributor","r");
+					if($emailtxt != "" && $emailtxt != "undefined")
+					{
+						$ftpResponse=$emailtxt;
+					}
+				}
+
+				print "FTP Response in child: " . $ftpresponse . "\n\n\n\n";
+
+				if($ftpresponse != "undefined" && $ftpresponse != "")
+				{
+					 sendEmail($distributor, $contact, $images, $ftype);
+				}
+			break;
+
+			default:										# else pID is parent, print message.
+				// @parent
+				print "FTP has been triggered for $distributor, process is running.\n\n";
+			break;
+		}
+	}
+
+	function start_Custom_FTP($distributor, $dir, $ftype)
+	{
+		print "FTP Function Initialized." . "\n\n"; 							# print ftp function status update
+
+														# trigger FTP Script, and assign results to variable (below)
+		$results = shell_exec("sudo bash /foo/bar/scripts/$distributor/ftp_$distributor.sh $distributor $dir $ftype 2>&1");
+
+		return '' . $results . '';									# return results of FTP script to original function
+	}
+														# ftp function
+	function start_FTP_1($distributor, $dir)
+	{
+		print "FTP Function Initialized." . "\n\n"; 							# print ftp function status update
+
+														# trigger FTP Script, and assign results to variable (below)
+		$results = shell_exec("sudo bash /foo/bar/scripts/ftp_1.sh $distributor $dir 2>&1");
+		return '' . $results . '';									# return results of FTP script to original function
+	}
+	
+	function start_FTP_2($distributor, $dir)
+	{
+		print "FTP Function Initialized." . "\n\n"; 							# print ftp function status update
+
+														# trigger FTP Script, and assign results to variable (below)
+		$results = shell_exec("sudo bash /foo/bar/scripts/ftp_2.sh $distributor $dir 2>&1");
+		return '' . $results . '';									# return results of FTP script to original function
+	}
+
+														# send email function (alerts to both the distributor and to support)
+	function sendEmail($distributor, $to, $images, $ftype)
+	{	// function global variables //
+		$sendCustEmail	= TRUE;
+		$fCount			= 0;
+		$ftplog			= fopen("/tmp/ftplog_" . $distributor);
+		$ftpSearch		= strpos($ftplog, "550 Create Directory operation failed");
+		if($distributor == "distributor_4")
+		{
+			$extension 	= ".xml";
+		}
+		else
+		{
+			$extension 	= ".xls";
+		}
+		$MetaFile 		= "MetaData_$distributor" . "$extension";
+			
+		$exportbase 	= mysql_connect("localhost","foo","bar");
+		if(!$exportbase)
+		{
+			die('Could not connect: ' . mysql_error());
+		}
+		mysql_select_db("exports", $exportbase);
+	
+		$cRet 			= "\n\r";								# set variable for line breaks
+		$Message 		= "";
+		$errLog 		= $cRet . $cRet . "FTP Error Log:" . $cRet . $cRet;
+
+		$sqlReq 		= Q_INSERT_ERROR_DB;
+
+		$rec 			= mysql_query($sqlReq);
+		while($row = mysql_fetch_assoc($rec))
+		{
+			$id 			= $row["id"]; 
+			$FTPResponse	= $row["FTPlog"];
+		}
+		
+														# get sent file count from DB and add meta file if fcount > 0
+		$sqlReq 		= Q_GET_SENT_FILE_COUNT_DB;
+		$rec 			= mysql_query($sqlReq);
+		while($row = mysql_fetch_assoc($rec))
+		{
+			$fCount		= intval($row["sentfiles"]);
+		}
+		if($fCount > 0)
+		{
+			$Message 	.= "\t>>" . $MetaFile . "\n\n";
+		}
+		else
+		{
+			$Message 	.= "No files were sent to $distributor.";
+			$sendCustEmail = FALSE;
+		}
+
+		$sqlReq 		= Q_GET_FILE_LIST_DB;
+
+		$rec 			= mysql_query($sqlReq);
+		while($row = mysql_fetch_assoc($rec))
+		{
+			$sentBookstems[] = $row["id"];
+		}
+
+		foreach($sentBookstems as $id)
+		{
+			$Message 	.= "\t>>" . $id . "\n";
+		}
+
+														# set distributor message variable
+		$PreMsg			=	'Dear ' . $distributor . ' Representative(s),'
+					.	$cRet
+					.	$cRet
+					.	'The following files have been uploaded to your FTP by Tantor: '
+					.	$cRet
+					.	$cRet;
+														# set distributor message variable
+		$PostMsg  		=	$cRet . '---The $MyCompany Team' . $cRet . '[This is an automated message]';
+
+		$RepMsg   		=	$PreMsg . $Message . $PostMsg;					# set full distributor message (excluding errors)
+
+		ini_set('SMTP', 'mail.bitbull.com');								# set SMTP
+		ini_set('sendmail_from', 'support@bitbull.com');						# set sendmail -- don't think this is working
+		date_default_timezone_set("EST");								# set default time zone -- necessary to make email work
+		$currDate		= 	date("Y-m-d");							# set variable for current date
+														# set email variables (below)
+
+		$Subject		=	'FTP File Drop Notification for files from $User to ' . $distributor . ' [' . $currDate . ']';
+		$Headers		=	'MIME-Version: 1.0' . "\n\r"
+					.	'Content-type: text/html; charset=ISO-8859-1' . "\n\r"
+					.	'From: support@bitbull.com' . "\n\r"
+					.	'Reply-To: support@bitbull.com' . "\n\r";
+
+		if($sendCustEmail)										# if FTP was sent and didn't error out
+		{
+			mail('distributors@bitbull.com', $Subject, $RepMsg, NULL, '-fsupport@bitbull.com');
+		}
+														# set email variables for support alert (below)
+		$SuppHdr		=	'MIME-Version: 1.0' . "\n\r"
+					.	'Content-type: text/html; charset=ISO-8859-1' . "\n\r"
+					.	'From: website@bitbull.com' . "\n\r"
+					.	'Reply-To: noreply@bitbull.com' . "\n\r";
+
+		$sqlReq 		= 	Q_GET_LOG_ID_DB;
+
+		$rec 			= mysql_query($sqlReq);
+		while($row = mysql_fetch_assoc($rec))
+		{
+			$unsentBookstems[] = $row["id"];
+		}
+
+		foreach($unsentBookstems as $id)
+		{
+			$errLog 	.= "\t" . "**" . $id . "[could not be sent: folder does not exist]" . $cRet;
+		}
+		
+		if($ftpSearch !== false)
+		{
+			$errLog 	.= "\n\n\r\r" . "FTP LOG:" . "\n\n\r\r" . $ftplog;
+		}
+														# set support email message variable (below)
+		$sPreMsg		= 'FTP File transfer notification for files to ' . $distributor . ':' . $cRet;
+
+														# set support email message variable (below)
+		$suppMsg		= $sPreMsg . $Message . $errLog . $cRet . '[This is an automated message, please do not reply]';
+
+														# send email to support alerting them of the drop with errors (below)
+		mail('support@bitbull.com', $Subject, $suppMsg, NULL, '-fwebsite@bitbull.com');
+		
+		if($FTPResponse == '')
+		{
+			$sqlReq 		= Q_UPDATE_FTP_LOG_DB;
+
+			mysql_query($sqlReq);
+		}
+		return true;
+	}
+
+	function sendErrEmail($distributor)
+	{
+		$cRet 			= "\n\r";								# set variable for line breaks
+
+		ini_set('SMTP', 'mail.bitbull.com');								# set SMTP
+		ini_set('sendmail_from', 'support@bitbull.com');						# set sendmail -- don't think this is working [MP 2012-06-27]
+		date_default_timezone_set("EST");								# set default time zone -- necessary to make email work [MP 2012-06-27]
+		$currDate 		= date("Y-m-d");							# set variable for current date
+
+														# set email variables for support alert (below)
+		$SuppHdr	=	'MIME-Version: 1.0' . $cRet
+					.	'Content-type: text/plain; charset=utf8' . $cRet
+					.	'From: website@bitbull.com' . $cRet
+					.	'Reply-To: noreply@bitbull.com' . $cRet;
+
+		$Subject		= 'NOTICE: FTP File transfer for ' . $distributor . ' is taking too long [' . $currDate . ']'; 
+														# set support email message variable (below)
+		$sPreMsg		= 'FTP File transfer for ' . $distributor . ' is taking too long, check to see if process was cancelled or hung up.' . $cRet;
+
+														# set support email message variable (below)
+		$suppMsg		= $sPreMsg . '[This is an automated message, please do not reply]';
+
+														# send email to support alerting them of the drop with errors (below)
+		mail('support@bitbull.com', $Subject, $suppMsg, null, '-fwebsite@bitbull.com');
+	}
+
+	function getFileCount($distributor, )
+	{
+		$fCount			= 15;
+		$column1 		= 'Value1';
+		if($distributor == 'distributor_1')
+		{
+			$market 	= 'Value2';
+		}
+
+		$conn 			= mysql_connect("localhost","myuser","mypass123");
+		if(!$conn)
+		{
+			die('Could not connect to archive: ' . mysql_error());
+		}
+		else
+		{
+			mysql_select_db("booklist", $conn);
+			$result 	= mysql_query("SELECT COUNT(a.id) AS FileCount FROM table_a AS a LEFT JOIN table_b AS b ON a.id = b.id WHERE (b.column1='$column1' AND b.column2='ABC123') AND a.id NOT LIKE 'Test%' AND (a.expires IS NULL OR a.expires<(DATE_SUB(CURDATE(), INTERVAL 740 DAY)));");
+
+			$row		= mysql_fetch_array($result);
+			if($row['FileCount'] > 0 && $row['FileCount'] != null)
+			{
+				$fCount = $row['FileCount'];
+			}
+		}
+		return $fCount;
+		mysql_close($conn);
+	}
+?>
