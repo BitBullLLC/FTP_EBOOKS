@@ -1,0 +1,242 @@
+#!/bin/bash/ -xvd
+# Script to send Digital files to online distributors via FTP
+# Copyright (c) 2013
+# Created by: Meia Benitez Meiss
+# Created on: 2013-02-01
+# Last edited by: Meia Benitez Meiss [MBM]
+# Last edited on: 2013-02-01
+# Editor Tags: Meia Benitez Meiss [MBM]
+# Notes:	
+#		[2013-02-01] This script is triggered by bash_ftp.php [MBM]
+#		[2013-02-01] Please remember to add updates to comment log, with date, and update the "Last Edited". [MBM]
+#
+# Updates:
+#		[YYYY-MM-DD] Comment Here [Editor Tag]
+#		[2013-02-01] Added comments and copyright language. [MBM]
+
+# PULL IN ARGUMENTS AND SET AS VARIABLES #
+company=$1						# set variable to contain company name
+doall=$2						# set doall flag for mysql
+dir=$3
+
+# FTP VARIABLES PULLED IN FROM FTP_Vars.sh #
+host=`sudo bash FTP_Vars.sh $company host`              # set host variable for FTP
+port=`sudo bash FTP_Vars.sh $company port`              # set port variable for FTP
+user=`sudo bash FTP_Vars.sh $company user`              # set user variable for FTP
+pass=`sudo bash FTP_Vars.sh $company pass`              # set password variable for FTP
+
+# COMPANY SPECIFIC CONSTANT VARS PULLED IN FROM Constant_Vars.sh #
+images=`sudo bash Constant_Vars.sh $company images`     # set the images flag for FTP
+market=`sudo bash Constant_Vars.sh $company market`     # set the market type for MySQL
+metapath=`sudo bash Constant_Vars.sh $company metapath` # set the meta file path (Onix files have a diff path)
+metaext=`sudo bash Constant_Vars.sh $company metaext`   # set the meta file extenson (.xml for Onix; .xls for all else)
+metadate=`sudo bash Constant_Vars.sh $company metadate` # set the meta file date flag to add date to file name (Mostly for Onix)
+sslflag=`sudo bash Constant_Vars.sh $company sslflag`   # set the ssl flag for FTP
+ebookext=`sudo bash Constant_Vars.sh $company ebookext` # set the extension for ebooks (.pdf/.epub)
+
+# TEMP FILE LOCATIONS, OVERWRITTEN EACH NEW EXECUTION #
+tempfile="/tmp/ftp_$company"				# set tempfile for FTP script
+emailmsg="/tmp/Email_$company"				# set email message for email function
+errorlog="/tmp/errorlog_$company"			# set error log file for debugging purposes
+ftplog="/tmp/ftplog_$company"				# set default value for ftplog
+
+# META FILE NAMES #
+metafile="MetaData_$company"				# set the metafile name
+exportfile="export_$company"				# set the export file namex
+
+# MISC VARIABLE DEFAULTS #
+companyname="$company"            	 		# set default companyname as a string
+mountdir="home/eBooks"					# mount directory for local files
+imgdir="home/eBooks"					# mount directory for ebook images
+imgext=".jpg"						# set fedault image extension (audiobooks only)
+sqllimit=""						# set default limit variable
+sqlupd=""						# set default updated variable, will send all titles
+response=""						# set default response variable, will be added to later
+query=""						# set default query variable
+
+# DATABASE VARIABLES (BOOKLIST) PULLED IN FROM /SQLinfo/bookbase #
+bookbase=(`cat SQLinfo/bookbase | tr "\n" " "`)		# get bookbase variables and place in an array to drop into variables
+bbusr=${bookbase[0]}					# set bookbase user login
+bbpass=${bookbase[1]}					# set bookbase user password
+bbhost=${bookbase[2]}					# set bookbase host address
+bbdb=${bookbase[3]}					# set bookbase database name
+
+
+# DATABASE VARIABLES (EXPORTS) PULLED IN FROM /SQLinfo/exportbase # 
+exportbase=(`cat SQLinfo/exportbase | tr "\n" " "`)	# get exportbase variables and place in an array to drop into variables
+ebusr=${exportbase[0]}					# set exportbase user login
+ebpass=${exportbase[1]}					# set exportbase password
+ebhost=${exportbase[2]}					# set exportbase host address
+ebdb=${exportbase[3]}					# set exportbase database name
+
+# START IF STATEMENTS #
+if [[ $metadate == 1 ]]; then	# if metadate flag is on, append date to meta file name.
+	metafile+="_"
+	metafile+="`date +"%Y-%m-%d"`"
+fi							# end if
+
+# SET META FILE EXTENSIONS #							
+metafile+="$metaext"					# add extension to meta file
+exportfile+=".php"					# add extension to export file
+
+# SET ARRAYS/COUNT #
+declare -a prodarr					# declare array
+declare -a eid						# declare array
+let count=0						# set count to 0
+
+# SET MYSQL QUERY STRING FOR EBOOKS ONLY #
+query1=`sudo bash eBookQuery $company $doall $market`
+query2=`sudo bash exportidQuery $company`
+
+# RUN SQL QUERIES TO PULL TITLES AND LOG EXPORT PROGRESS #
+prodarr=($(mysql -N -u$bbusr -p$bbpass -h$bbhost -D$bbdb -e "$query1"))
+							#sql query to insert ftp log data into database for current export
+mysql -N -u$ebusr -p$ebpass -h$ebhost -D$ebdb -e "$query2"));
+exportid=${eid[0]}
+
+query3=`sudo bash insertQuery $company $exportid`
+
+# START FTP FUNCTIONS (all functions written to file, which is later executed) #
+echo "open -p $port $host" > $tempfile			# set FTP host
+echo "set net:max-retries 5" >> $tempfile		# set maximum number of retries to 3.
+echo "set net:timeout 1500" >> $tempfile 		# set the FTP timeout for 25 minutes
+echo "set net:reconnect-interval-base 180" >> $tempfile	# set the reconnect interval between connections to 3 minutes
+echo "set net:reconnect-interval-max 1200" >> $tempfile # set the reconnect max interval between connections to 20 minutes
+echo "set net:reconnect-interval-multiplier 2" >> $tempfile
+if [[ $sslflag == 1 ]]; then				# if sslflag is 1 (true)
+	echo "set ftp:ssl-allow no" >> $tempfile	# set the SSL-Allow to 'no'
+fi
+echo "user $user $pass" >> $tempfile			# set FTP login
+echo "mkdir $dir" >> $tempfile				# make remote directory
+echo "cd $dir" >> $tempfile				# change to newly made remote directory
+echo "lcd /$mountdir/" >> $tempfile			# locate local directory /books/
+							# start log files
+echo "Time Triggered: `date +"%Y-%m-%d_%T"`" > $errorlog
+echo "" >> $errorlog
+echo "" > $emailmsg
+echo "SQL Query:" >> $errorlog 
+echo "$query" >> $errorlog
+echo "" >> $errorlog
+
+for item in ${prodarr[@]}				# for each title in product array populated by the mysql query
+do
+	declare -a prod					# declare product array
+	prod=(`echo ${item} | tr ":" " "`)		# split each bookstem:ean and drop each value into array
+	bookstem=${prod[0]}				# first split value is bookstem
+	ean=${prod[1]}					# second split value is ean
+	localstatus=0					# set localstatus to 0 on each loop (determines if file exists)
+
+	classicdir=""					# reset classic directory to empty string
+	if [ -d "/eBooks/ClassicPDF/$bookstem" ]; then	# if classic directory exists
+        	classicdir="ClassicPDF/"		# set classic directory
+		imgext="_L.jpg"				# set image extension to audiobook extension
+		imgdir="bookimages"			# set image directory to audiobook location
+   	fi
+
+	echo "" >> $errorlog
+
+	if [ -d "/$mountdir/$classicdir$bookstem" ]; then	# if the title exists in the local directory then moves titles
+	
+		localstatus=1				# set local status to 1 (folder exists on the server)
+							#if title is NOT an ebook then mount audiobook file
+		if [ -e "/$mountdir/$classicdir$bookstem/$bookstem$ebookext" ]; then
+			echo "mkdir $bookstem" >> $tempfile
+			echo "cd $bookstem" >> $tempfile
+			echo "put /$mountdir/$classicdir$bookstem/$bookstem$ebookext" >> $tempfile
+			echo "[`date +"%Y-%m-%d_%T"`] $bookstem$ebookext [exists on local server: wrote to file] " >> $errorlog
+			echo "FILE PATH: /$mountdir/$classicdir$bookstem/$bookstem$ebookext" >> $errorlog
+		else
+			echo "[`date +"%Y-%m-%d_%T"`] ** $bookstem$ebookext [could not be sent: file does not exist]" >> $errorlog
+			echo "FOLDER PATH: /$mountdir/$classicdir$bookstem/$bookstem$ebookext/" >> $errorlog
+		fi
+
+		if [[ $images == 1 ]]; then		# if the flag is set to move images, move images too, and rename to EAN.
+			echo "cd $bookstem" >> $tempfile
+											# if file exists in folder put image file & rename, & add to log
+			if [ -e "/$imgdir/$bookstem/$bookstem$imgext" ]; then
+				echo "put /$imgdir/$bookstem/$bookstem$imgext -o $ean.jpg" >> $tempfile
+				echo "[`date +"%Y-%m-%d_%T"`] $bookstem$imgext [exists on local server: wrote to file]" >> $errorlog
+				echo "FILE PATH: /$imgdir/$bookstem/$bookstem$imgext" >> $errorlog
+			else			# else add to log and skip
+				echo "[`date +"%Y-%m-%d_%T"`] ** $bookstem$imgext [could not be sent: image does not exist]" >> $errorlog
+				echo "FILE PATH: /$imgdir/$bookstem/$bookstem$imgext" >> $errorlog
+			fi			# end inner if
+		fi					# end outer if
+		
+		echo "cd .." >> $tempfile		# change to parent directory
+				
+		echo "\t>> $bookstem" >> $emailmsg	# echo item for notification purposes
+	else						# else if title does not exist in the local directory
+		echo "[`date +"%Y-%m-%d_%T"`] ** $bookstem [could not be sent: folder does not exist]" >> $errorlog
+		echo "FOLDER PATH: /$mountdir/$classicdir$bookstem/$bookstem/" >> $errorlog
+							# end inner if
+	fi						# end outer if
+
+	mysql -N -u$ebusr -p$ebpass -h$ebhost -D$ebdb -e "$query3";
+
+done
+
+declare -a sentfiles
+sentfiles=($(mysql -N -u$ebusr -p$ebpass -h$ebhost -D$ebdb -e "$query3"))
+fcount=${sentfiles[0]}
+
+if [ "$fcount" != "0" ]; then
+        echo "" >> $errorlog
+        echo "Sent File Count: $fcount" >> $errorlog
+        echo "" >> $errorlog
+
+        php /var/www/scripts/$company/$exportfile               		 # execute MetaData generator
+
+        if [ -e "$metapath/$metafile" ]; then                    # metafile exists
+                echo "put $metapath/$metafile" >> $tempfile    # send metafile and write to log
+                echo "[`date +"%Y-%m-%d_%T"`] $metafile [exists on local server: wrote to file]" >> $errorlog
+		echo "FILE PATH: $metapath/$metafile" >> $errorlog
+        else                                                    # else if metafile does not exist, write to emails and logs
+                echo "[`date +"%Y-%m-%d_%T"`] ** $metafile [could not be sent: file does not exist]" >> $errorlog
+		echo "FILE PATH: $metapath/$metafile" >> $errorlog
+        fi
+
+        echo "" >> $errorlog
+
+        echo "bye" >> $tempfile                                 # close and clean up FTP connection
+        echo "" >> $errorlog                                    # add new line to error log
+        echo "FTP Log:" >> $errorlog                            # echo any errors, to split for email notifications
+
+        lftp -d -f $tempfile 2> $ftplog                         # trigger FTP store response in variable
+        echo "" >> $ftplog                                      # add new line to error log file
+        echo "Time completed: `date +"%Y-%m-%d_%T"`" >> $ftplog # error log timestamp
+        logtxt=`cat $ftplog`                                    # assign log variable to put in error log
+
+        echo "" >> $errorlog
+        echo "$logtxt" >> $errorlog
+        mysql -N -u$ebusr -p$ebpass -h$ebhost -D$ebdb -e "$query";
+else
+        echo "FTP Log:" >> $errorlog
+        echo "" >> $errorlog
+        echo "" >> $ftplog
+        echo "No files were sent, all selected items were not on local server." >> $errorlog
+        echo "No files were sent, all selected items were not on local server." >> $ftplog
+        echo "" >> $errorlog
+        echo "" >> $ftplog
+        echo "Time completed: `date +"%Y-%m-%d_%T"`" >> $ftplog # error log timestamp
+        
+	echo "" >> $errorlog
+	echo "DEBUG INFORMATION:" >> $ftplog
+	echo "" >> $errorlog
+	echo "Host:   $host" >> $errorlog
+	echo "Port:   $port" >> $errorlog
+	echo "User:   $user" >> $errorlog
+	echo "Pass:   $pass" >> $errorlog
+	echo "Dir:    $dir" >> $errorlog
+	echo "Comp:   $company" >> $errorlog
+	echo "DoAll:  $doall" >> $errorlog
+	echo "Images: $images" >> $errorlog
+	echo "" >> $ftplog
+
+	mysql -N -u$ebusr -p$ebpass -h$ebhost -D$ebdb -e "$query3";
+fi
+
+# RETURN RESPONSE TO PHP FILE WHICH EXECUTED BASH SCRIPT #
+echo -e "FTP Process has completed, $fcount files have been transferred over and the notification/error email(s) have been sent."
+
+exit 0
